@@ -33,6 +33,7 @@ import java.util.stream.Stream;
  *
  * @author Paulo Lopes
  */
+// TODO to remove when updating to vert.x 4
 public final class JWT {
 
     private final Logger logger = LoggerFactory.getLogger(JWT.class);

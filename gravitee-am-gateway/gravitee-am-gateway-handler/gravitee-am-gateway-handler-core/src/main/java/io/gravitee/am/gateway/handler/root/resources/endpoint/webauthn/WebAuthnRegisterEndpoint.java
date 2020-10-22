@@ -179,12 +179,10 @@ public class WebAuthnRegisterEndpoint extends WebAuthnEndpoint {
                 return;
             }
 
-            // register credentials
-            WebAuthnSettings webAuthnSettings = domain.getWebAuthnSettings();
-            AuthenticatorAttachment authenticatorAttachment = webAuthnSettings != null ? webAuthnSettings.getAuthenticatorAttachment() : null;
+            // get authenticated user
             User user = ((io.gravitee.am.gateway.handler.common.vertx.web.auth.user.User) ctx.user().getDelegate()).getUser();
-            webauthnRegister.put("id", user.getId());
-            webauthnRegister.put("type", authenticatorAttachment != null ? authenticatorAttachment.getValue() : "unspecified");
+
+            // register credentials
             webAuthn.createCredentialsOptions(webauthnRegister, createCredentialsOptions -> {
                 if (createCredentialsOptions.failed()) {
                     ctx.fail(createCredentialsOptions.cause());
@@ -192,6 +190,8 @@ public class WebAuthnRegisterEndpoint extends WebAuthnEndpoint {
                 }
 
                 final JsonObject credentialsOptions = createCredentialsOptions.result();
+                // force user id with our own user id
+                credentialsOptions.getJsonObject("user").put("id", user.getId());
 
                 // save challenge to the session
                 ctx.session()

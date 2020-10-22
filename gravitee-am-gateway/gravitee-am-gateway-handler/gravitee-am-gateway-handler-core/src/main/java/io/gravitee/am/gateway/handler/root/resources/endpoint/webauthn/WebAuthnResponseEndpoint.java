@@ -22,16 +22,19 @@ import io.gravitee.am.gateway.handler.common.vertx.core.http.VertxHttpServerRequ
 import io.gravitee.am.gateway.handler.common.vertx.utils.RequestUtils;
 import io.gravitee.am.gateway.handler.root.resources.auth.handler.FormLoginHandler;
 import io.gravitee.am.gateway.handler.vertx.auth.webauthn.WebAuthn;
+import io.gravitee.am.gateway.handler.vertx.auth.webauthn.WebAuthnCredentials;
 import io.gravitee.am.identityprovider.api.Authentication;
 import io.gravitee.am.identityprovider.api.SimpleAuthenticationContext;
+import io.gravitee.am.model.Domain;
+import io.gravitee.am.model.ReferenceType;
 import io.gravitee.am.model.oidc.Client;
+import io.gravitee.am.service.CredentialService;
 import io.gravitee.common.http.HttpHeaders;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.auth.User;
-import io.vertx.ext.auth.webauthn.WebAuthnCredentials;
 import io.vertx.reactivex.core.http.HttpServerRequest;
 import io.vertx.reactivex.ext.web.RoutingContext;
 import io.vertx.reactivex.ext.web.Session;
@@ -46,14 +49,26 @@ import org.slf4j.LoggerFactory;
  */
 public class WebAuthnResponseEndpoint extends WebAuthnEndpoint {
     private static final Logger logger = LoggerFactory.getLogger(WebAuthnResponseEndpoint.class);
+    private static final String DEFAULT_ORIGIN = "http://localhost:8092";
     private static final String CLIENT_CONTEXT_KEY = "client";
     private static final String PASSWORDLESS_AUTH_COMPLETED  = "passwordlessAuthCompleted";
     private WebAuthn webAuthn;
+    private CredentialService credentialService;
+    private Domain domain;
+    private String origin;
 
     public WebAuthnResponseEndpoint(UserAuthenticationManager userAuthenticationManager,
-                                    WebAuthn webAuthn) {
+                                    WebAuthn webAuthn,
+                                    CredentialService credentialService,
+                                    Domain domain) {
         super(userAuthenticationManager);
         this.webAuthn = webAuthn;
+        this.credentialService = credentialService;
+        this.domain = domain;
+        this.origin = (domain.getWebAuthnSettings() != null
+                && domain.getWebAuthnSettings().getOrigin() != null) ?
+                domain.getWebAuthnSettings().getOrigin() :
+                DEFAULT_ORIGIN;
     }
 
     @Override
@@ -83,12 +98,12 @@ public class WebAuthnResponseEndpoint extends WebAuthnEndpoint {
             final Client client = ctx.get(CLIENT_CONTEXT_KEY);
             final String userId = session.get("userId");
             final String username = session.get("username");
-            webauthnResp.put("userId", userId);
 
             // authenticate the user
             webAuthn.authenticate(
                     // authInfo
                     new WebAuthnCredentials()
+                            .setOrigin(origin)
                             .setChallenge(session.get("challenge"))
                             .setUsername(session.get("username"))
                             .setWebauthn(webauthnResp), authenticate -> {
@@ -99,20 +114,28 @@ public class WebAuthnResponseEndpoint extends WebAuthnEndpoint {
                         if (authenticate.succeeded()) {
                             authenticateUser(ctx, client, username, h -> {
                                 if (h.failed()) {
-                                    logger.error("An error has occurred while authenticating user {}", username, authenticate.cause());
+                                    logger.error("An error has occurred while authenticating user {}", username, h.cause());
                                     ctx.fail(401);
                                     return;
                                 }
                                 final User user = h.result();
-                                // save the user into the context
-                                ctx.getDelegate().setUser(user);
-                                // the user has upgraded from unauthenticated to authenticated
-                                // session should be upgraded as recommended by owasp
-                                session.regenerateId();
-                                ctx.session().put(PASSWORDLESS_AUTH_COMPLETED, true);
-                                // Now redirect back to the original url
-                                String returnURL = session.get(FormLoginHandler.DEFAULT_RETURN_URL_PARAM);
-                                ctx.response().putHeader(HttpHeaders.LOCATION, returnURL).end();
+                                // save the user into the credential
+                                updateCredential(webauthnResp.getString("id"), userId, credentialHandler -> {
+                                    if (credentialHandler.failed()) {
+                                        logger.error("An error has occurred while authenticating user {}", username, credentialHandler.cause());
+                                        ctx.fail(401);
+                                        return;
+                                    }
+                                    // save the user into the context
+                                    ctx.getDelegate().setUser(user);
+                                    // the user has upgraded from unauthenticated to authenticated
+                                    // session should be upgraded as recommended by owasp
+                                    session.regenerateId();
+                                    ctx.session().put(PASSWORDLESS_AUTH_COMPLETED, true);
+                                    // Now redirect back to the original url
+                                    String returnURL = session.get(FormLoginHandler.DEFAULT_RETURN_URL_PARAM);
+                                    ctx.response().putHeader(HttpHeaders.LOCATION, returnURL).end();
+                                });
                             });
                         } else {
                             logger.error("Unexpected exception", authenticate.cause());
@@ -139,6 +162,14 @@ public class WebAuthnResponseEndpoint extends WebAuthnEndpoint {
         userAuthenticationManager.authenticate(client, authentication, true)
                 .subscribe(
                         user -> handler.handle(Future.succeededFuture(new io.gravitee.am.gateway.handler.common.vertx.web.auth.user.User(user))),
+                        error -> handler.handle(Future.failedFuture(error))
+                );
+    }
+
+    private void updateCredential(String credentialId, String userId, Handler<AsyncResult<Void>> handler) {
+        credentialService.update(ReferenceType.DOMAIN, domain.getId(), credentialId, userId)
+                .subscribe(
+                        () -> handler.handle(Future.succeededFuture()),
                         error -> handler.handle(Future.failedFuture(error))
                 );
     }
